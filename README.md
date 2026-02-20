@@ -16,6 +16,7 @@ Sends a random photo from your Mac Photos library to a recipient via email on a 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 

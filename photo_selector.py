@@ -5,23 +5,105 @@ Select a random photo from the Mac Photos library.
 - With a person name: selects from photos tagged with that person.
 - Without a person name: selects from the entire library.
 
+Photo data is cached to disk and only rebuilt when the Photos library changes.
+
 Usage:
     python photo_selector.py                    # random from entire library
     python photo_selector.py "Alice Smith"      # random photo of Alice Smith
     python photo_selector.py --list-persons     # list all known person names
+    python photo_selector.py --refresh-cache    # force a cache rebuild
 """
 
 import argparse
+import pickle
+import pathlib
 import random
 import sys
+from dataclasses import dataclass, field
+from typing import Optional
 
 import osxphotos
 
+CACHE_FILE = pathlib.Path(__file__).parent / ".photos_cache.pkl"
 
-def load_library() -> osxphotos.PhotosDB:
-    """Load the default Photos library. Requires Full Disk Access."""
+
+@dataclass
+class PhotoRecord:
+    """Lightweight snapshot of a photo's metadata, used in place of PhotoInfo after caching."""
+    path: str
+    original_filename: str
+    date: Optional[str]
+    persons: list = field(default_factory=list)
+    title: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Cache management
+# ---------------------------------------------------------------------------
+
+def _db_mtime(library_path: str) -> Optional[float]:
+    """Return the mtime of the Photos SQLite file, or None if not found."""
+    sqlite_path = pathlib.Path(library_path) / "database" / "Photos.sqlite"
     try:
-        return osxphotos.PhotosDB()
+        return sqlite_path.stat().st_mtime
+    except FileNotFoundError:
+        return None
+
+
+def _load_cache() -> Optional[dict]:
+    """Load the cache if it exists and is still fresh. Returns None on miss."""
+    if not CACHE_FILE.exists():
+        return None
+    try:
+        with open(CACHE_FILE, "rb") as f:
+            cache = pickle.load(f)
+        current_mtime = _db_mtime(cache["library_path"])
+        if current_mtime is not None and cache["db_mtime"] == current_mtime:
+            return cache
+    except Exception:
+        pass
+    return None
+
+
+def _build_and_save_cache(db: osxphotos.PhotosDB) -> dict:
+    """Extract photo records from the library, save to disk, and return the cache dict."""
+    print("Building photo cache (this runs once, then stays fast)...")
+    photos = []
+    for p in db.photos():
+        if p.path is None:
+            continue
+        photos.append(PhotoRecord(
+            path=p.path,
+            original_filename=p.original_filename,
+            date=p.date.strftime("%Y-%m-%d") if p.date else None,
+            persons=p.persons or [],
+            title=p.title or None,
+        ))
+
+    cache = {
+        "library_path": db.library_path,
+        "db_mtime": _db_mtime(db.library_path),
+        "photos": photos,
+    }
+    with open(CACHE_FILE, "wb") as f:
+        pickle.dump(cache, f)
+    print(f"Cached {len(photos)} local photos.")
+    return cache
+
+
+def get_photos(force_refresh: bool = False) -> list:
+    """
+    Return a list of PhotoRecord objects, using the on-disk cache when possible.
+    Rebuilds the cache if it is missing, stale, or force_refresh is True.
+    """
+    if not force_refresh:
+        cache = _load_cache()
+        if cache:
+            return cache["photos"]
+
+    # Cache miss — load osxphotos, build cache
+    try:
+        db = osxphotos.PhotosDB()
     except Exception as e:
         print(f"Error: Could not open Photos library: {e}", file=sys.stderr)
         print(
@@ -31,78 +113,86 @@ def load_library() -> osxphotos.PhotosDB:
         )
         sys.exit(1)
 
+    cache = _build_and_save_cache(db)
+    return cache["photos"]
 
-def list_persons(db: osxphotos.PhotosDB) -> None:
-    """Print all named persons in the library with their photo counts."""
-    persons = db.persons_as_dict  # {name: count}
-    if not persons:
+
+# ---------------------------------------------------------------------------
+# Selection logic
+# ---------------------------------------------------------------------------
+
+def list_persons(photos: list) -> None:
+    """Print all named persons and their photo counts."""
+    counts: dict = {}
+    for p in photos:
+        for name in p.persons:
+            counts[name] = counts.get(name, 0) + 1
+
+    if not counts:
         print("No named persons found in the Photos library.")
         return
+
     print(f"{'Person':<40} {'Photos':>6}")
     print("-" * 48)
-    for name, count in sorted(persons.items(), key=lambda x: x[0].lower()):
+    for name, count in sorted(counts.items(), key=lambda x: x[0].lower()):
         print(f"{name:<40} {count:>6}")
 
 
-def select_photo(db: osxphotos.PhotosDB, person: str | None = None) -> osxphotos.PhotoInfo | None:
+def select_photo(photos: list, person: Optional[str] = None) -> Optional[PhotoRecord]:
     """
-    Select a random locally-available photo.
+    Select a random photo from the cached photo list.
 
     Args:
-        db: Loaded PhotosDB instance.
-        person: Person name to filter by, or None for the full library.
+        photos: Full list of PhotoRecord objects.
+        person: Person name to filter by, or None to use the entire library.
 
     Returns:
-        A PhotoInfo object, or None if no eligible photos were found.
+        A PhotoRecord, or None if no eligible photos were found.
     """
     if person:
-        # Validate the person name exists before querying
-        known = {p.lower(): p for p in db.persons}
+        # Build a case-insensitive name index from available photos
+        known: dict = {}
+        for p in photos:
+            for name in p.persons:
+                known.setdefault(name.lower(), name)
+
         canonical = known.get(person.lower())
         if canonical is None:
-            print(
-                f"Error: No person named '{person}' found in the library.",
-                file=sys.stderr,
-            )
-            close_matches = [p for p in db.persons if person.lower() in p.lower()]
-            if close_matches:
-                print(f"Did you mean one of: {', '.join(close_matches)}?", file=sys.stderr)
+            print(f"Error: No person named '{person}' found in the library.", file=sys.stderr)
+            close = [n for n in known.values() if person.lower() in n.lower()]
+            if close:
+                print(f"Did you mean one of: {', '.join(close)}?", file=sys.stderr)
             return None
-        photos = db.photos(persons=[canonical])
+
+        pool = [p for p in photos if canonical in p.persons]
         label = f"'{canonical}'"
     else:
-        photos = db.photos()
+        pool = photos
         label = "entire library"
 
-    # Only consider photos with a local file path (excludes iCloud-only assets)
-    local_photos = [p for p in photos if p.path is not None]
-
-    if not local_photos:
-        if person:
-            print(
-                f"No locally available photos found for {label}.\n"
-                "Photos may be stored in iCloud with 'Optimize Mac Storage' enabled.",
-                file=sys.stderr,
-            )
-        else:
-            print("No locally available photos found in the library.", file=sys.stderr)
+    if not pool:
+        print(f"No locally available photos found for {label}.", file=sys.stderr)
         return None
 
-    chosen = random.choice(local_photos)
-    print(f"Selected 1 of {len(local_photos)} local photos from {label}.")
+    chosen = random.choice(pool)
+    print(f"Selected 1 of {len(pool)} local photos from {label}.")
     return chosen
 
 
-def print_photo_info(photo: osxphotos.PhotoInfo) -> None:
+def print_photo_info(photo: PhotoRecord) -> None:
     """Print a summary of the selected photo."""
     print(f"  Path:     {photo.path}")
     print(f"  Filename: {photo.original_filename}")
-    print(f"  Date:     {photo.date.strftime('%Y-%m-%d') if photo.date else 'unknown'}")
+    print(f"  Date:     {photo.date or 'unknown'}")
     if photo.persons:
         print(f"  Persons:  {', '.join(photo.persons)}")
     if photo.title:
         print(f"  Title:    {photo.title}")
 
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -119,16 +209,24 @@ def main() -> None:
         action="store_true",
         help="List all named persons in the library and exit.",
     )
+    parser.add_argument(
+        "--refresh-cache",
+        action="store_true",
+        help="Force a rebuild of the photo cache, then exit.",
+    )
     args = parser.parse_args()
 
-    print("Loading Photos library...")
-    db = load_library()
+    photos = get_photos(force_refresh=args.refresh_cache)
 
-    if args.list_persons:
-        list_persons(db)
+    if args.refresh_cache:
+        print("Cache refreshed.")
         return
 
-    photo = select_photo(db, person=args.person)
+    if args.list_persons:
+        list_persons(photos)
+        return
+
+    photo = select_photo(photos, person=args.person)
     if photo:
         print_photo_info(photo)
 
