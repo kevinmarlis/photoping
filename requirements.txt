@@ -1,2 +1,2 @@
-osxphotos>=0.69.0
+osxphotos>=0.75.0
 python-dotenv>=1.0.0

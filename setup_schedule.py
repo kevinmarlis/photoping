@@ -86,7 +86,7 @@ def install() -> None:
     if not VENV_PYTHON.exists():
         print(
             f"Error: Virtual environment not found at {VENV_PYTHON}\n"
-            "Run: python3.12 -m venv .venv && pip install -r requirements.txt",
+            "Run: uv venv --python 3.13 && uv pip install -r requirements.txt",
             file=sys.stderr,
         )
         sys.exit(1)

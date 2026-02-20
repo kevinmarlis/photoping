@@ -1,5 +1,7 @@
 .env
 .venv
 .photos_cache.pkl
+uv.lock
 __pycache__/
+.pytest_cache/
 *.pyc

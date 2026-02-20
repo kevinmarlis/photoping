@@ -13,11 +13,12 @@ Sends a random photo from your Mac Photos library to a recipient via email on a 
 
 ### 2. Create a virtual environment and install dependencies
 
+`osxphotos` requires Python 3.13. Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if you haven't already, then:
+
 ```bash
-python3.12 -m venv .venv
+uv venv --python 3.13
 source .venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 ```
 
 ### 3. Configure credentials and settings
@@ -47,20 +48,14 @@ Edit `.env` with your values:
 ### 4. Test photo selection
 
 ```bash
-# List all named persons in your library
 python photo_selector.py --list-persons
-
-# Pick a random photo of a specific person
 python photo_selector.py "Alice Smith"
-
-# Pick a random photo from the entire library
 python photo_selector.py
 ```
 
 ### 5. Test the full flow (dry run)
 
 ```bash
-# Select a photo and log what would be sent — no email is sent
 python photoping.py --dry-run
 ```
 
@@ -79,11 +74,17 @@ python setup_schedule.py install
 This installs a launchd job using the `CADENCE`, `SEND_HOUR`, and `SEND_WEEKDAY` values from `.env`. The job runs automatically in the background. Output is logged to `photoping.log` in the project directory.
 
 ```bash
-# Check the job is loaded
 python setup_schedule.py status
-
-# Remove the schedule
 python setup_schedule.py uninstall
+```
+
+## Running tests
+
+Dev dependencies are declared in `pyproject.toml` under `[dependency-groups] dev`. Install them and run:
+
+```bash
+uv pip install --group dev
+.venv/bin/pytest -v
 ```
 
 ## Project Structure
@@ -94,15 +95,18 @@ photoping/
 ├── photo_selector.py   # Queries the Photos library and picks a random photo
 ├── email_sender.py     # Sends a photo via Gmail SMTP
 ├── setup_schedule.py   # Installs/uninstalls the launchd background job
+├── tests/              # Test suite (68 tests, no Photos access required)
+├── pyproject.toml      # Project metadata, dev dependencies, and tool config
+├── requirements.txt    # Runtime dependencies
 ├── .env.example        # Template for credentials and settings
 ├── .env                # Your credentials (not committed to git)
 ├── photoping.log       # Log output from scheduled runs (auto-created)
-├── requirements.txt
 └── README.md
 ```
 
 ## Notes
 
+- **Python version**: `osxphotos` requires Python 3.13. Use `uv venv --python 3.13` to get it automatically.
 - **iCloud Optimize Storage**: If you have "Optimize Mac Storage" enabled, some photos may not be stored locally. The selector filters these out automatically.
 - **Person names**: Names are matched case-insensitively. Use `--list-persons` to see the exact names in your library.
 - **Photo cache**: The first run builds a local cache (`.photos_cache.pkl`) so subsequent runs are fast. The cache auto-refreshes when your Photos library changes. Force a rebuild with:
