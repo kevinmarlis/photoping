@@ -20,7 +20,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 3. Configure credentials
+### 3. Configure credentials and settings
 
 ```bash
 cp .env.example .env
@@ -28,12 +28,21 @@ cp .env.example .env
 
 Edit `.env` with your values:
 
-- **`SENDER_EMAIL`** — your Gmail address
-- **`SENDER_PASSWORD`** — a Gmail App Password (**not** your regular password)
-  - Requires 2-Step Verification enabled on your Google account
-  - Generate one at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)
-  - It will look like `xxxx xxxx xxxx xxxx`
-- **`RECIPIENT_EMAIL`** — where photos should be delivered
+| Variable | Required | Description |
+|---|---|---|
+| `SENDER_EMAIL` | Yes | Your Gmail address |
+| `SENDER_PASSWORD` | Yes | Gmail App Password (see below) |
+| `RECIPIENT_EMAIL` | Yes | Where photos are delivered |
+| `EMAIL_SUBJECT` | No | Subject line (default: "A photo for you") |
+| `PERSON_NAME` | No | Filter to a specific person; leave blank for full library |
+| `CADENCE` | Yes | `daily` or `weekly` |
+| `SEND_HOUR` | Yes | Hour to send, 0–23 (e.g. `9` = 9 AM) |
+| `SEND_WEEKDAY` | Weekly only | 0=Sunday … 6=Saturday |
+
+**Gmail App Password:**
+- Requires 2-Step Verification on your Google account
+- Generate one at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)
+- It will look like `xxxx xxxx xxxx xxxx`
 
 ### 4. Test photo selection
 
@@ -48,30 +57,59 @@ python photo_selector.py "Alice Smith"
 python photo_selector.py
 ```
 
-### 5. Test sending an email
+### 5. Test the full flow (dry run)
 
 ```bash
-# Send a specific photo
-python email_sender.py /path/to/photo.jpg
+# Select a photo and log what would be sent — no email is sent
+python photoping.py --dry-run
+```
 
-# Send with a custom subject
-python email_sender.py /path/to/photo.jpg --subject "Remember this?"
+### 6. Send a test email
+
+```bash
+python photoping.py
+```
+
+### 7. Install the schedule
+
+```bash
+python setup_schedule.py install
+```
+
+This installs a launchd job using the `CADENCE`, `SEND_HOUR`, and `SEND_WEEKDAY` values from `.env`. The job runs automatically in the background. Output is logged to `photoping.log` in the project directory.
+
+```bash
+# Check the job is loaded
+python setup_schedule.py status
+
+# Remove the schedule
+python setup_schedule.py uninstall
 ```
 
 ## Project Structure
 
 ```
 photoping/
-├── photo_selector.py   # Select a random photo from the Photos library
-├── email_sender.py     # Send a photo via Gmail SMTP
-├── .env.example        # Template for credentials (copy to .env)
+├── photoping.py        # Main runner — selects a photo and sends it
+├── photo_selector.py   # Queries the Photos library and picks a random photo
+├── email_sender.py     # Sends a photo via Gmail SMTP
+├── setup_schedule.py   # Installs/uninstalls the launchd background job
+├── .env.example        # Template for credentials and settings
 ├── .env                # Your credentials (not committed to git)
+├── photoping.log       # Log output from scheduled runs (auto-created)
 ├── requirements.txt
 └── README.md
 ```
 
 ## Notes
 
-- **iCloud Optimize Storage**: If you have "Optimize Mac Storage" enabled, some photos may not be stored locally. The selector filters these out automatically. To include them, you'd need to download them first via the Photos app.
+- **iCloud Optimize Storage**: If you have "Optimize Mac Storage" enabled, some photos may not be stored locally. The selector filters these out automatically.
 - **Person names**: Names are matched case-insensitively. Use `--list-persons` to see the exact names in your library.
-- **Photo cache**: The first run will be slow while the Photos library is indexed. Subsequent runs load from a local cache (`.photos_cache.pkl`) and are fast. The cache auto-refreshes when your Photos library changes. Run `python photo_selector.py --refresh-cache` to force a rebuild.
+- **Photo cache**: The first run builds a local cache (`.photos_cache.pkl`) so subsequent runs are fast. The cache auto-refreshes when your Photos library changes. Force a rebuild with:
+  ```bash
+  python photo_selector.py --refresh-cache
+  ```
+- **Logs**: When running on a schedule, all output goes to `photoping.log`. Tail it to monitor:
+  ```bash
+  tail -f photoping.log
+  ```
