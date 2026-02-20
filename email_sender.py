@@ -19,7 +19,9 @@ import os
 import pathlib
 import smtplib
 import sys
+from datetime import datetime
 from email.message import EmailMessage
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -46,13 +48,25 @@ def load_config() -> dict:
     }
 
 
+def _format_date(date_str: Optional[str]) -> Optional[str]:
+    """Convert 'YYYY-MM-DD' to 'Month D, YYYY' (e.g. 'March 15, 2019')."""
+    if not date_str:
+        return None
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").strftime("%B %-d, %Y")
+    except ValueError:
+        return date_str
+
+
 def build_message(
     sender: str,
     recipient: str,
     photo_path: str,
     subject: str,
+    date: Optional[str] = None,
+    location: Optional[str] = None,
 ) -> EmailMessage:
-    """Compose an EmailMessage with the photo attached and a simple HTML body."""
+    """Compose an EmailMessage with the photo inlined and optional metadata caption."""
     msg = EmailMessage()
     msg["From"] = sender
     msg["To"] = recipient
@@ -63,18 +77,31 @@ def build_message(
         print(f"Error: Photo not found at {photo_path}", file=sys.stderr)
         sys.exit(1)
 
-    # Plain text fallback
-    msg.set_content("A photo for you. See attachment.")
+    # Build plain-text fallback
+    meta_parts = [p for p in [_format_date(date), location] if p]
+    plain_meta = f"\n{' · '.join(meta_parts)}" if meta_parts else ""
+    msg.set_content(f"A photo for you.{plain_meta}")
 
-    # HTML body with the image inlined
+    # Build metadata caption for the HTML body
+    formatted_date = _format_date(date)
+    caption_parts = [p for p in [formatted_date, location] if p]
+    caption_html = (
+        f'<p style="margin: 12px 0 0; color: #888; font-size: 13px; text-align: center;">'
+        f'{" &nbsp;·&nbsp; ".join(caption_parts)}</p>'
+        if caption_parts else ""
+    )
+
     cid = "photo"
     msg.add_alternative(
         f"""\
         <html>
-          <body style="font-family: sans-serif; background: #f5f5f5; padding: 24px;">
-            <img src="cid:{cid}"
-                 style="max-width: 100%; border-radius: 8px; display: block; margin: 0 auto;"
-                 alt="{photo.name}">
+          <body style="font-family: sans-serif; background: #f5f5f5; padding: 24px; margin: 0;">
+            <div style="max-width: 600px; margin: 0 auto;">
+              <img src="cid:{cid}"
+                   style="max-width: 100%; border-radius: 8px; display: block;"
+                   alt="{photo.name}">
+              {caption_html}
+            </div>
           </body>
         </html>
         """,
@@ -94,13 +121,20 @@ def build_message(
     return msg
 
 
-def send_photo(photo_path: str, subject: str = "A photo for you") -> None:
+def send_photo(
+    photo_path: str,
+    subject: str = "A photo for you",
+    date: Optional[str] = None,
+    location: Optional[str] = None,
+) -> None:
     """
     Send a photo to the configured recipient via Gmail SMTP.
 
     Args:
         photo_path: Absolute path to the image file.
         subject:    Email subject line.
+        date:       Photo date string ('YYYY-MM-DD'), shown in the email caption.
+        location:   Human-readable location string, shown in the email caption.
     """
     config = load_config()
 
@@ -109,6 +143,8 @@ def send_photo(photo_path: str, subject: str = "A photo for you") -> None:
         recipient=config["recipient_email"],
         photo_path=photo_path,
         subject=subject,
+        date=date,
+        location=location,
     )
 
     print(f"Sending to {config['recipient_email']} via Gmail SMTP...")

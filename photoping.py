@@ -84,7 +84,12 @@ def main() -> None:
         return
 
     subject = os.environ.get("EMAIL_SUBJECT", "").strip() or "A photo for you"
-    email_sender.send_photo(photo_path=photo.path, subject=subject)
+    email_sender.send_photo(
+        photo_path=photo.path,
+        subject=subject,
+        date=photo.date,
+        location=photo.location,
+    )
 
 
 if __name__ == "__main__":

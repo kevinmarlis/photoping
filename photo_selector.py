@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+import os
 import pickle
 import pathlib
 import random
@@ -25,6 +26,9 @@ from typing import Optional
 import osxphotos
 
 CACHE_FILE = pathlib.Path(__file__).parent / ".photos_cache.pkl"
+CACHE_VERSION = 2  # increment when PhotoRecord fields change
+MAX_PHOTO_SIZE_MB = 20
+MAX_PHOTO_SIZE_BYTES = MAX_PHOTO_SIZE_MB * 1024 * 1024
 
 
 @dataclass
@@ -36,6 +40,8 @@ class PhotoRecord:
     date: Optional[str]
     persons: list = field(default_factory=list)
     title: Optional[str] = None
+    size_bytes: Optional[int] = None
+    location: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -53,12 +59,14 @@ def _db_mtime(library_path: str) -> Optional[float]:
 
 
 def _load_cache() -> Optional[dict]:
-    """Load the cache if it exists and is still fresh. Returns None on miss."""
+    """Load the cache if it exists, is still fresh, and matches the current schema version."""
     if not CACHE_FILE.exists():
         return None
     try:
         with open(CACHE_FILE, "rb") as f:
             cache = pickle.load(f)
+        if cache.get("version") != CACHE_VERSION:
+            return None  # schema changed, rebuild
         current_mtime = _db_mtime(cache["library_path"])
         if current_mtime is not None and cache["db_mtime"] == current_mtime:
             return cache
@@ -74,6 +82,19 @@ def _build_and_save_cache(db: osxphotos.PhotosDB) -> dict:
     for p in db.photos():
         if p.path is None:
             continue
+
+        try:
+            size_bytes = os.path.getsize(p.path)
+        except OSError:
+            size_bytes = None
+
+        location = None
+        try:
+            if p.place:
+                location = p.place.name
+        except Exception:
+            pass
+
         photos.append(
             PhotoRecord(
                 path=p.path,
@@ -81,10 +102,13 @@ def _build_and_save_cache(db: osxphotos.PhotosDB) -> dict:
                 date=p.date.strftime("%Y-%m-%d") if p.date else None,
                 persons=p.persons or [],
                 title=p.title or None,
+                size_bytes=size_bytes,
+                location=location,
             )
         )
 
     cache = {
+        "version": CACHE_VERSION,
         "library_path": db.library_path,
         "db_mtime": _db_mtime(db.library_path),
         "photos": photos,
@@ -182,8 +206,24 @@ def select_photo(photos: list, person: Optional[str] = None) -> Optional[PhotoRe
         print(f"No locally available photos found for {label}.", file=sys.stderr)
         return None
 
-    chosen = random.choice(pool)
-    print(f"Selected 1 of {len(pool)} local photos from {label}.")
+    # Filter out photos over the size cap (skip check if size is unknown)
+    sized_pool = [
+        p for p in pool
+        if p.size_bytes is None or p.size_bytes <= MAX_PHOTO_SIZE_BYTES
+    ]
+    if not sized_pool:
+        print(
+            f"All photos for {label} exceed the {MAX_PHOTO_SIZE_MB} MB size cap.",
+            file=sys.stderr,
+        )
+        return None
+    if len(sized_pool) < len(pool):
+        print(
+            f"Skipped {len(pool) - len(sized_pool)} photo(s) over {MAX_PHOTO_SIZE_MB} MB."
+        )
+
+    chosen = random.choice(sized_pool)
+    print(f"Selected 1 of {len(sized_pool)} eligible photos from {label}.")
     return chosen
 
 
@@ -192,6 +232,10 @@ def print_photo_info(photo: PhotoRecord) -> None:
     print(f"  Path:     {photo.path}")
     print(f"  Filename: {photo.original_filename}")
     print(f"  Date:     {photo.date or 'unknown'}")
+    if photo.location:
+        print(f"  Location: {photo.location}")
+    if photo.size_bytes is not None:
+        print(f"  Size:     {photo.size_bytes / (1024 * 1024):.1f} MB")
     if photo.persons:
         print(f"  Persons:  {', '.join(photo.persons)}")
     if photo.title:
