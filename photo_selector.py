@@ -21,12 +21,13 @@ import pathlib
 import random
 import sys
 from dataclasses import dataclass, field
+from datetime import date as date_type, datetime
 from typing import Optional
 
 import osxphotos
 
 CACHE_FILE = pathlib.Path(__file__).parent / ".photos_cache.pkl"
-CACHE_VERSION = 2  # increment when PhotoRecord fields change
+CACHE_VERSION = 3  # increment when PhotoRecord fields change
 MAX_PHOTO_SIZE_MB = 20
 MAX_PHOTO_SIZE_BYTES = MAX_PHOTO_SIZE_MB * 1024 * 1024
 
@@ -81,6 +82,8 @@ def _build_and_save_cache(db: osxphotos.PhotosDB) -> dict:
     photos = []
     for p in db.photos():
         if p.path is None:
+            continue
+        if p.screenshot or p.screen_recording:
             continue
 
         try:
@@ -208,8 +211,7 @@ def select_photo(photos: list, person: Optional[str] = None) -> Optional[PhotoRe
 
     # Filter out photos over the size cap (skip check if size is unknown)
     sized_pool = [
-        p for p in pool
-        if p.size_bytes is None or p.size_bytes <= MAX_PHOTO_SIZE_BYTES
+        p for p in pool if p.size_bytes is None or p.size_bytes <= MAX_PHOTO_SIZE_BYTES
     ]
     if not sized_pool:
         print(
@@ -225,6 +227,66 @@ def select_photo(photos: list, person: Optional[str] = None) -> Optional[PhotoRe
     chosen = random.choice(sized_pool)
     print(f"Selected 1 of {len(sized_pool)} eligible photos from {label}.")
     return chosen
+
+
+def select_on_this_day(
+    photos: list, person: Optional[str] = None
+) -> Optional[PhotoRecord]:
+    """
+    Select a random photo taken on today's month and day in a previous year.
+
+    Args:
+        photos: Full list of PhotoRecord objects.
+        person: Person name to filter by, or None to draw from the entire library.
+
+    Returns:
+        A PhotoRecord, or None if no matching photos exist.
+    """
+    today = date_type.today()
+
+    candidates = []
+    for p in photos:
+        if not p.date:
+            continue
+        try:
+            d = datetime.strptime(p.date, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if d.month == today.month and d.day == today.day and d.year < today.year:
+            candidates.append(p)
+
+    if not candidates:
+        return None
+
+    # When no specific person is requested, prefer photos that have at least one
+    # tagged person — fall back to untagged only if nothing else is available.
+    if not person:
+        with_persons = [p for p in candidates if p.persons]
+        if with_persons:
+            candidates = with_persons
+
+    # Apply person filter (silent — person already validated by select_photo)
+    if person:
+        known: dict = {}
+        for p in candidates:
+            for name in p.persons:
+                known.setdefault(name.lower(), name)
+        canonical = known.get(person.lower())
+        if canonical:
+            candidates = [p for p in candidates if canonical in p.persons]
+        if not candidates:
+            return None
+
+    # Apply size filter
+    sized = [
+        p
+        for p in candidates
+        if p.size_bytes is None or p.size_bytes <= MAX_PHOTO_SIZE_BYTES
+    ]
+    if not sized:
+        return None
+
+    return random.choice(sized)
 
 
 def print_photo_info(photo: PhotoRecord) -> None:

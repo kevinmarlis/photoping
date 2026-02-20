@@ -1,12 +1,12 @@
 """
 email_sender.py
 
-Send a photo via email using Gmail SMTP.
+Send one or more photos via email using Gmail SMTP.
 
 Reads configuration from a .env file in the project directory:
     SENDER_EMAIL    - Gmail address to send from
     SENDER_PASSWORD - Gmail App Password (not your regular password)
-    RECIPIENT_EMAIL - Address to deliver photos to
+    RECIPIENT_EMAIL - One or more comma-separated addresses to deliver photos to
 
 Usage (standalone):
     python email_sender.py /path/to/photo.jpg
@@ -19,9 +19,11 @@ import os
 import pathlib
 import smtplib
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from email.message import EmailMessage
-from typing import Optional
+from email.utils import formataddr
+from typing import List, Optional
 
 from dotenv import load_dotenv
 
@@ -29,6 +31,16 @@ load_dotenv()
 
 GMAIL_SMTP_HOST = "smtp.gmail.com"
 GMAIL_SMTP_PORT = 465  # SSL
+
+
+@dataclass
+class PhotoEntry:
+    """A single photo to include in an email, with optional metadata."""
+
+    path: str
+    date: Optional[str] = None  # 'YYYY-MM-DD'
+    location: Optional[str] = None
+    label: Optional[str] = None  # Section header shown above the photo
 
 
 def _require_env(key: str) -> str:
@@ -41,10 +53,18 @@ def _require_env(key: str) -> str:
 
 
 def load_config() -> dict:
+    raw_recipients = _require_env("RECIPIENT_EMAIL")
+    recipients = [r.strip() for r in raw_recipients.split(",") if r.strip()]
+    sender_email = _require_env("SENDER_EMAIL")
+    sender_name = os.environ.get("SENDER_NAME", "").strip() or None
     return {
-        "sender_email": _require_env("SENDER_EMAIL"),
+        "sender_email": sender_email,
         "sender_password": _require_env("SENDER_PASSWORD"),
-        "recipient_email": _require_env("RECIPIENT_EMAIL"),
+        "recipient_emails": recipients,
+        # Format as "Name <email>" if a display name is configured
+        "sender_formatted": formataddr((sender_name, sender_email))
+        if sender_name
+        else sender_email,
     }
 
 
@@ -58,49 +78,113 @@ def _format_date(date_str: Optional[str]) -> Optional[str]:
         return date_str
 
 
-def build_message(
-    sender: str,
-    recipient: str,
-    photo_path: str,
-    subject: str,
-    date: Optional[str] = None,
-    location: Optional[str] = None,
-) -> EmailMessage:
-    """Compose an EmailMessage with the photo inlined and optional metadata caption."""
-    msg = EmailMessage()
-    msg["From"] = sender
-    msg["To"] = recipient
-    msg["Subject"] = subject
-
-    photo = pathlib.Path(photo_path)
-    if not photo.exists():
-        print(f"Error: Photo not found at {photo_path}", file=sys.stderr)
-        sys.exit(1)
-
-    # Build plain-text fallback
-    meta_parts = [p for p in [_format_date(date), location] if p]
-    plain_meta = f"\n{' · '.join(meta_parts)}" if meta_parts else ""
-    msg.set_content(f"A photo for you.{plain_meta}")
-
-    # Build metadata caption for the HTML body
-    formatted_date = _format_date(date)
-    caption_parts = [p for p in [formatted_date, location] if p]
-    caption_html = (
-        f'<p style="margin: 12px 0 0; color: #888; font-size: 13px; text-align: center;">'
-        f'{" &nbsp;·&nbsp; ".join(caption_parts)}</p>'
-        if caption_parts else ""
+def _caption_html(entry: PhotoEntry) -> str:
+    """Return the HTML caption paragraph for a photo entry, or empty string."""
+    parts = [p for p in [_format_date(entry.date), entry.location] if p]
+    if not parts:
+        return ""
+    return (
+        '<p style="margin: 10px 0 0; color: #999; font-size: 13px; text-align: center;">'
+        + " &nbsp;·&nbsp; ".join(parts)
+        + "</p>"
     )
 
-    cid = "photo"
+
+def _label_html(label: str) -> str:
+    """Return the HTML section-header element for an 'on this day' style label."""
+    return (
+        '<p style="margin: 0 0 16px; font-size: 11px; font-weight: 600; '
+        'text-transform: uppercase; letter-spacing: 0.08em; color: #bbb; text-align: center;">'
+        + label
+        + "</p>"
+    )
+
+
+def _intro_html(entries: List[PhotoEntry]) -> str:
+    """
+    Return a brief sentence to display above the first photo.
+    Gives email clients text to preview and helps avoid image-only spam signals.
+    """
+    first = entries[0]
+    date_str = _format_date(first.date)
+    parts = [p for p in [date_str, first.location] if p]
+    if len(entries) > 1:
+        year = entries[1].date[:4] if entries[1].date else None
+        tail = f", plus a memory from {year}" if year else ", plus a memory"
+    else:
+        tail = ""
+    body = (
+        "A photo from " + " in ".join(parts) if parts else "A photo from your library"
+    )
+    return (
+        f'<p style="color: #666; font-size: 14px; line-height: 1.6; '
+        f'margin: 0 0 16px; text-align: center;">{body}{tail}.</p>'
+    )
+
+
+def build_message(
+    sender: str,
+    recipients: List[str],
+    entries: List[PhotoEntry],
+    subject: str,
+) -> EmailMessage:
+    """
+    Compose an EmailMessage with one or more photos inlined.
+    Photos after the first are separated by a divider and an optional label.
+    """
+    msg = EmailMessage()
+    msg["From"] = sender
+    msg["To"] = ", ".join(recipients)
+    msg["Reply-To"] = sender
+    msg["Subject"] = subject
+
+    # Validate all paths up front
+    for entry in entries:
+        if not pathlib.Path(entry.path).exists():
+            print(f"Error: Photo not found at {entry.path}", file=sys.stderr)
+            sys.exit(1)
+
+    # Plain-text fallback — include intro sentence so the email isn't content-free
+    first = entries[0]
+    first_parts = [p for p in [_format_date(first.date), first.location] if p]
+    intro_text = (
+        ("A photo from " + " in ".join(first_parts))
+        if first_parts
+        else "A photo from your library"
+    )
+    plain_lines = [intro_text + "."]
+    for entry in entries:
+        if entry.label:
+            plain_lines.append("\n" + entry.label)
+        parts = [p for p in [_format_date(entry.date), entry.location] if p]
+        if parts:
+            plain_lines.append(" · ".join(parts))
+    msg.set_content("\n".join(plain_lines))
+
+    # Build HTML photo blocks
+    photo_blocks = [_intro_html(entries)]
+    for i, entry in enumerate(entries):
+        cid = f"photo_{i}"
+        block = ""
+        if i > 0:
+            block += '<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 28px 0;">'
+        if entry.label:
+            block += _label_html(entry.label)
+        block += (
+            f'<img src="cid:{cid}" '
+            f'style="max-width: 100%; border-radius: 8px; display: block;" '
+            f'alt="{pathlib.Path(entry.path).name}">'
+        )
+        block += _caption_html(entry)
+        photo_blocks.append(block)
+
+    html_body = "\n".join(photo_blocks)
     msg.add_alternative(
         f"""\
         <html>
           <body style="font-family: sans-serif; background: #f5f5f5; padding: 24px; margin: 0;">
             <div style="max-width: 600px; margin: 0 auto;">
-              <img src="cid:{cid}"
-                   style="max-width: 100%; border-radius: 8px; display: block;"
-                   alt="{photo.name}">
-              {caption_html}
+              {html_body}
             </div>
           </body>
         </html>
@@ -108,46 +192,38 @@ def build_message(
         subtype="html",
     )
 
-    # Attach the image and link it to the CID used above
-    mime_type, _ = mimetypes.guess_type(photo_path)
-    maintype, subtype = (mime_type or "application/octet-stream").split("/", 1)
-    with open(photo_path, "rb") as f:
-        image_data = f.read()
-
-    # Add the inline image to the HTML part
+    # Attach each image as a related part linked to its CID
     html_part = msg.get_payload(1)  # index 1 is the HTML alternative
-    html_part.add_related(image_data, maintype=maintype, subtype=subtype, cid=cid)
+    for i, entry in enumerate(entries):
+        cid = f"photo_{i}"
+        mime_type, _ = mimetypes.guess_type(entry.path)
+        maintype, subtype = (mime_type or "application/octet-stream").split("/", 1)
+        with open(entry.path, "rb") as f:
+            image_data = f.read()
+        html_part.add_related(image_data, maintype=maintype, subtype=subtype, cid=cid)
 
     return msg
 
 
-def send_photo(
-    photo_path: str,
-    subject: str = "A photo for you",
-    date: Optional[str] = None,
-    location: Optional[str] = None,
-) -> None:
+def send_photos(entries: List[PhotoEntry], subject: str = "A photo for you") -> None:
     """
-    Send a photo to the configured recipient via Gmail SMTP.
+    Send one or more photos to all configured recipients via Gmail SMTP.
 
     Args:
-        photo_path: Absolute path to the image file.
-        subject:    Email subject line.
-        date:       Photo date string ('YYYY-MM-DD'), shown in the email caption.
-        location:   Human-readable location string, shown in the email caption.
+        entries: List of PhotoEntry objects (in display order).
+        subject: Email subject line.
     """
     config = load_config()
 
     msg = build_message(
-        sender=config["sender_email"],
-        recipient=config["recipient_email"],
-        photo_path=photo_path,
+        sender=config["sender_formatted"],
+        recipients=config["recipient_emails"],
+        entries=entries,
         subject=subject,
-        date=date,
-        location=location,
     )
 
-    print(f"Sending to {config['recipient_email']} via Gmail SMTP...")
+    recipients_str = ", ".join(config["recipient_emails"])
+    print(f"Sending to {recipients_str} via Gmail SMTP...")
     try:
         with smtplib.SMTP_SSL(GMAIL_SMTP_HOST, GMAIL_SMTP_PORT) as smtp:
             smtp.login(config["sender_email"], config["sender_password"])
@@ -164,6 +240,18 @@ def send_photo(
     except smtplib.SMTPException as e:
         print(f"Error: Failed to send email: {e}", file=sys.stderr)
         sys.exit(1)
+
+
+def send_photo(
+    photo_path: str,
+    subject: str = "A photo for you",
+    date: Optional[str] = None,
+    location: Optional[str] = None,
+) -> None:
+    """Single-photo convenience wrapper around send_photos. Used by the CLI."""
+    send_photos(
+        [PhotoEntry(path=photo_path, date=date, location=location)], subject=subject
+    )
 
 
 def main() -> None:
