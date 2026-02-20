@@ -30,6 +30,7 @@ CACHE_FILE = pathlib.Path(__file__).parent / ".photos_cache.pkl"
 @dataclass
 class PhotoRecord:
     """Lightweight snapshot of a photo's metadata, used in place of PhotoInfo after caching."""
+
     path: str
     original_filename: str
     date: Optional[str]
@@ -40,6 +41,7 @@ class PhotoRecord:
 # ---------------------------------------------------------------------------
 # Cache management
 # ---------------------------------------------------------------------------
+
 
 def _db_mtime(library_path: str) -> Optional[float]:
     """Return the mtime of the Photos SQLite file, or None if not found."""
@@ -72,13 +74,15 @@ def _build_and_save_cache(db: osxphotos.PhotosDB) -> dict:
     for p in db.photos():
         if p.path is None:
             continue
-        photos.append(PhotoRecord(
-            path=p.path,
-            original_filename=p.original_filename,
-            date=p.date.strftime("%Y-%m-%d") if p.date else None,
-            persons=p.persons or [],
-            title=p.title or None,
-        ))
+        photos.append(
+            PhotoRecord(
+                path=p.path,
+                original_filename=p.original_filename,
+                date=p.date.strftime("%Y-%m-%d") if p.date else None,
+                persons=p.persons or [],
+                title=p.title or None,
+            )
+        )
 
     cache = {
         "library_path": db.library_path,
@@ -121,6 +125,7 @@ def get_photos(force_refresh: bool = False) -> list:
 # Selection logic
 # ---------------------------------------------------------------------------
 
+
 def list_persons(photos: list) -> None:
     """Print all named persons and their photo counts."""
     counts: dict = {}
@@ -158,7 +163,10 @@ def select_photo(photos: list, person: Optional[str] = None) -> Optional[PhotoRe
 
         canonical = known.get(person.lower())
         if canonical is None:
-            print(f"Error: No person named '{person}' found in the library.", file=sys.stderr)
+            print(
+                f"Error: No person named '{person}' found in the library.",
+                file=sys.stderr,
+            )
             close = [n for n in known.values() if person.lower() in n.lower()]
             if close:
                 print(f"Did you mean one of: {', '.join(close)}?", file=sys.stderr)
@@ -193,6 +201,7 @@ def print_photo_info(photo: PhotoRecord) -> None:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(

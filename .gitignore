@@ -1,2 +1,5 @@
+.env
 .venv
 .photos_cache.pkl
+__pycache__/
+*.pyc
